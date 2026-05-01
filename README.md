@@ -1,7 +1,3 @@
-# home-loan-calculator
-home-loan-calculator
-
-https://home-loan-calculator-vfggbjajyxlsyrsypjjjbx.streamlit.app/#loan-balance-over-time
 # 🏦 Pro Loan Architect: Advanced FinTech Amortization Engine
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)

@@ -8,7 +8,6 @@ st.set_page_config(page_title="Pro Loan Architect", layout="wide", initial_sideb
 
 # --- UTILITY: NUMBER FORMATTING ---
 def format_num(num, system="Western"):
-    # QA Check: Handle NaNs or Infinity just in case
     if pd.isna(num) or num == float('inf'):
         return "N/A"
         
@@ -38,11 +37,11 @@ def get_param(key, default, cast_type):
 # --- SIDEBAR: INPUTS & SETTINGS ---
 st.sidebar.title("⚙️ Loan Parameters")
 
-fmt_system = st.sidebar.radio("Number Format", ["Western", "Indian (Lakhs/Crores)"], horizontal=True)
+fmt_system = st.sidebar.radio("Number Format",["Western", "Indian (Lakhs/Crores)"], index=1, horizontal=True)
 
 st.sidebar.header("📝 Basic Details")
-principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 500000.0, float), step=10000.0)
-annual_rate = st.sidebar.slider("Annual Interest Rate (%)", 0.1, 25.0, get_param("r", 8.5, float), 0.1)
+principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 5000000.0, float), step=100000.0)
+annual_rate = st.sidebar.slider("Initial Interest Rate (%)", 0.1, 25.0, get_param("r", 8.5, float), 0.1)
 years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
 start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 
@@ -57,28 +56,74 @@ with st.sidebar.expander("⏱️ Compounding & Frequencies", expanded=False):
     compounding = st.selectbox("Interest Compounding", ["Monthly", "Daily", "Semi-Annual (Canadian)"])
 
 with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
-    extra_payment = st.number_input("Extra per Payment", min_value=0.0, value=0.0, step=100.0)
-    st.markdown("---")
-    recurring_lump = st.number_input("Annual Bonus Lump Sum", min_value=0.0, value=0.0, step=1000.0)
+    st.markdown("**1. Regular Prepayments**")
+    extra_payment = st.number_input("Extra per Payment", min_value=0.0, value=0.0, step=1000.0)
+    recurring_lump = st.number_input("Annual Bonus Lump Sum", min_value=0.0, value=0.0, step=10000.0)
     recurring_month = st.selectbox("Month for Annual Bonus", range(1, 13), index=11, format_func=lambda x: datetime(2000, x, 1).strftime('%B'))
+    
     st.markdown("---")
-    one_time_lump = st.number_input("One-Time Lump Sum", min_value=0.0, value=0.0, step=5000.0)
-    one_time_date = st.date_input("Date of One-Time Lump Sum", value=date.today())
+    st.markdown("**2. Irregular / Random Lump Sums**")
+    default_lumps = pd.DataFrame([{"Payment Date": date.today(), "Amount": 0.0}])
+    edited_lumps = st.data_editor(
+        default_lumps, 
+        num_rows="dynamic", 
+        hide_index=True,
+        column_config={
+            "Payment Date": st.column_config.DateColumn("Date", required=True),
+            "Amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=10000.0, required=True)
+        }
+    )
+    
+    # QA FIX: Empty Grid safety handler
+    custom_lump_sums =[]
+    if not edited_lumps.empty:
+        for _, row in edited_lumps.iterrows():
+            if pd.notna(row.get("Payment Date")) and pd.notna(row.get("Amount")) and row.get("Amount") > 0:
+                custom_lump_sums.append((pd.to_datetime(row["Payment Date"]), float(row["Amount"])))
+    custom_lump_tuple = tuple(custom_lump_sums)
 
 with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
-    rate_trend_active = st.checkbox("Enable Floating Rate Trend")
-    trend_amount = st.number_input("Increase rate by (%)", value=0.25, step=0.05)
-    trend_months = st.number_input("Every X months", min_value=1, value=12)
+    rate_trend_active = st.checkbox("Enable Interest Rate Changes")
+    
+    # QA FIX: Business Logic for Indian Banking (RLLR) vs Western Banking
+    rate_action = st.radio("When Rates Change, the Bank will:",[
+        "Keep EMI Same (Adjust Tenure)", 
+        "Recalculate EMI (Loan Recasting)"
+    ], help="Indian banks default to keeping your EMI the same and extending your tenure when rates rise.")
 
-# --- CORE MATH ENGINE (QA VERIFIED) ---
+    rate_mode = st.radio("Rate Change Mode",["Predictable Trend", "Custom Schedule (RBI Style)"])
+    
+    if rate_mode == "Predictable Trend":
+        trend_amount = st.number_input("Increase rate by (%)", value=0.25, step=0.05)
+        trend_months = st.number_input("Every X months", min_value=1, value=12)
+        custom_rates_dict = {}
+    else:
+        st.markdown("<small>Enter specific months (e.g., 18 = 1.5 years from start) and the **New Total Rate**.</small>", unsafe_allow_html=True)
+        default_schedule = pd.DataFrame([{"Month": 14, "New Rate (%)": 9.25}, {"Month": 36, "New Rate (%)": 8.50}])
+        edited_df = st.data_editor(default_schedule, num_rows="dynamic", hide_index=True)
+        
+        custom_rates_dict = {}
+        if not edited_df.empty:
+            for _, row in edited_df.iterrows():
+                if pd.notna(row.get("Month")) and pd.notna(row.get("New Rate (%)")):
+                    try:
+                        custom_rates_dict[int(row["Month"])] = float(row["New Rate (%)"])
+                    except ValueError:
+                        pass
+        trend_amount = 0.0
+        trend_months = 1
+
+# --- CORE MATH ENGINE ---
 @st.cache_data
-def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, rec_mo, one_lump, one_dt, trnd_act, trnd_amt, trnd_mo):
+def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, rec_mo, irregular_lumps, trnd_act, rate_mode_sel, rate_action_sel, trnd_amt, trnd_mo, custom_rates):
     data =[]
     balance = float(p)
     current_date = pd.to_datetime(start_dt)
+    start_datetime = pd.to_datetime(start_dt)
     
     periods_per_year = 26 if freq == "Accelerated Bi-Weekly" else 12
     total_periods = yrs * periods_per_year
+    failsafe_cap = total_periods * 3
     
     def get_period_rate(annual_pct):
         r = annual_pct / 100
@@ -98,46 +143,63 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
 
     current_rate = r_annual
     last_rec_year = current_date.year - 1
-    applied_one_time = False
     neg_amortization_flag = False
+    infinite_loan_flag = False
+    last_applied_custom_month = -1
+    applied_lump_indices = set()
 
     period_tax = annual_tax / periods_per_year
     period_ins = annual_ins / periods_per_year
-
-    # QA FIX: Strict Integer Conversion for Modulo Logic
     trend_period_interval = int(round(trnd_mo * (26/12))) if periods_per_year == 26 else int(trnd_mo)
 
-    for period in range(1, total_periods * 3): # Failsafe cap
+    for period in range(1, failsafe_cap):
         if freq == "Monthly":
             current_date += pd.DateOffset(months=1)
         else:
             current_date += pd.Timedelta(days=14)
             
-        if trnd_act and period > 1 and (period - 1) % trend_period_interval == 0:
-            current_rate += trnd_amt
-            rem_periods = total_periods - period + 1
-            if rem_periods > 0:
-                base_payment = get_emi(balance, get_period_rate(current_rate), rem_periods)
-
+        months_elapsed = (current_date.year - start_datetime.year) * 12 + (current_date.month - start_datetime.month)
+        rate_changed = False
+        
+        # --- FLOATING RATE ENGINE ---
+        if trnd_act:
+            if rate_mode_sel == "Predictable Trend":
+                if period > 1 and (period - 1) % trend_period_interval == 0:
+                    current_rate += trnd_amt
+                    rate_changed = True
+            elif rate_mode_sel == "Custom Schedule (RBI Style)":
+                if months_elapsed in custom_rates and months_elapsed != last_applied_custom_month:
+                    current_rate = custom_rates[months_elapsed]
+                    last_applied_custom_month = months_elapsed
+                    rate_changed = True
+                    
+        if rate_changed:
+            # QA FIX: Handle Prepayment/Tenure logic correctly based on user choice
+            if rate_action_sel == "Recalculate EMI (Loan Recasting)":
+                rem_periods = total_periods - period + 1
+                if rem_periods > 0 and balance > 0:
+                    base_payment = get_emi(balance, get_period_rate(current_rate), rem_periods)
+            # If "Keep EMI Same", we explicitly do nothing to base_payment.
+        
         period_r = get_period_rate(current_rate)
         interest = balance * period_r
         
         principal_pay = base_payment - interest
         actual_principal = principal_pay + ext_pay
         
+        # Process Prepayments
         if rec_lump > 0 and current_date.month == rec_mo and current_date.year > last_rec_year:
             actual_principal += rec_lump
             last_rec_year = current_date.year
             
-        if one_lump > 0 and not applied_one_time and current_date >= pd.to_datetime(one_dt):
-            actual_principal += one_lump
-            applied_one_time = True
+        for i, (l_date, l_amt) in enumerate(irregular_lumps):
+            if i not in applied_lump_indices and current_date >= l_date:
+                actual_principal += l_amt
+                applied_lump_indices.add(i)
 
-        # QA FIX: Detect Negative Amortization
         if actual_principal < 0:
             neg_amortization_flag = True
 
-        # Safety Check to prevent overpayment math errors
         if actual_principal >= balance:
             actual_principal = balance
             balance = 0
@@ -147,7 +209,7 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         data.append({
             "Period": period,
             "Date": current_date.date(),
-            "Rate (%)": round(current_rate, 2),
+            "Rate (%)": round(current_rate, 3), 
             "Payment Outflow": interest + actual_principal + period_tax + period_ins,
             "Interest": interest,
             "Principal": actual_principal,
@@ -157,19 +219,24 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
 
         if balance <= 0:
             break
+            
+        # QA FIX: Catch if loan hits failsafe cap without paying off
+        if period == failsafe_cap - 1 and balance > 0:
+            infinite_loan_flag = True
 
-    return pd.DataFrame(data), neg_amortization_flag
+    return pd.DataFrame(data), neg_amortization_flag, infinite_loan_flag
 
 # --- EXECUTE ENGINE ---
-df_base, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, 0, start_date, False, 0, 1)
-df_actual, has_neg_amortization = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, one_time_lump, one_time_date, rate_trend_active, trend_amount, trend_months)
+df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, {})
+df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_dict)
 
 # --- METRICS & ALERTS ---
 st.title("🏦 Pro Loan Architect")
 
-# QA UX FIX: Display Warning if Loan is growing
 if has_neg_amortization:
     st.error("⚠️ **CRITICAL WARNING: Negative Amortization Detected!** Your interest rate has climbed so high that your payments no longer cover the monthly interest. Your loan balance is actually *growing*.")
+if is_infinite:
+    st.error("🚨 **INFINITE LOAN DETECTED:** Your current parameters will never pay off the loan. The calculation was capped to prevent a server crash.")
 
 base_interest = df_base["Interest"].sum()
 actual_interest = df_actual["Interest"].sum()
@@ -185,17 +252,22 @@ cross_over_date = cross_over_df.iloc[0]["Date"].strftime('%B %Y') if not cross_o
 st.markdown("### 🎯 Scenario Summary")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Original Total Interest", format_num(base_interest, fmt_system))
-c2.metric("Actual Total Interest", format_num(actual_interest, fmt_system))
 
-if interest_saved >= 0:
-    c3.metric("Interest Saved 🎉", format_num(interest_saved, fmt_system), f"+{format_num(interest_saved, fmt_system)}")
-    c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Saved {month_diff} mos")
+# QA FIX: Mask output if loan is infinite
+if is_infinite:
+    c2.metric("Actual Total Interest", "Infinite 🚨")
+    c3.metric("Status", "Will Never Pay Off", "-∞")
+    c4.metric("Actual Payoff Date", "NEVER")
 else:
-    c3.metric("Extra Interest Paid 📉", format_num(abs(interest_saved), fmt_system), f"-{format_num(abs(interest_saved), fmt_system)}")
-    # QA FIX: Dynamic metric phrasing for extended loans
-    c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Extended by {abs(month_diff)} mos")
+    c2.metric("Actual Total Interest", format_num(actual_interest, fmt_system))
+    if interest_saved >= 0:
+        c3.metric("Interest Saved 🎉", format_num(interest_saved, fmt_system), f"+{format_num(interest_saved, fmt_system)}")
+        c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Saved {month_diff} mos")
+    else:
+        c3.metric("Extra Interest Paid 📉", format_num(abs(interest_saved), fmt_system), f"-{format_num(abs(interest_saved), fmt_system)}")
+        c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Extended by {abs(month_diff)} mos")
 
-if cross_over_date and not has_neg_amortization:
+if cross_over_date and not has_neg_amortization and not is_infinite:
     st.success(f"🔥 **Cross-Over Milestone:** In **{cross_over_date}**, you will officially start paying more toward your Home's Principal than to the Bank's Interest!")
 
 st.markdown("---")

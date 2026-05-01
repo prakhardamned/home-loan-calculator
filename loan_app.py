@@ -41,7 +41,7 @@ fmt_system = st.sidebar.radio("Number Format",["Western", "Indian (Lakhs/Crores)
 
 st.sidebar.header("📝 Basic Details")
 principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 5000000.0, float), step=100000.0)
-annual_rate = st.sidebar.slider("Initial Interest Rate (%)", 0.1, 25.0, get_param("r", 8.5, float), 0.1)
+annual_rate = st.sidebar.number_input("Initial Interest Rate (%)", min_value=0.10, max_value=25.00, value=get_param("r", 8.50, float), step=0.05, format="%.2f")
 years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
 start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 

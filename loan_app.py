@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit.components.v1 as components
 from datetime import datetime, date
 
 # --- PAGE CONFIGURATION ---
@@ -37,6 +38,16 @@ def get_param(key, default, cast_type):
 # --- SIDEBAR: INPUTS & SETTINGS ---
 st.sidebar.title("⚙️ Loan Parameters")
 
+# --- RESET BUTTON ---
+if st.sidebar.button("🔄 Reset All Inputs"):
+    # Clear Streamlit session state safely
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    # Clear URL query parameters
+    st.query_params.clear()
+    # Rerun cleanly
+    st.rerun()
+
 fmt_system = st.sidebar.radio("Number Format",["Western", "Indian (Lakhs/Crores)"], index=1, horizontal=True)
 
 st.sidebar.header("📝 Basic Details")
@@ -46,6 +57,34 @@ years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
 start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 
 st.query_params.update({"p": principal, "r": annual_rate, "y": years})
+
+# --- SHAREABLE LINK ---
+with st.sidebar.expander('🔗 Shareable Link', expanded=False):
+    st.caption('This link shares: Loan Amount, Rate, Term. Use Reset to clear everything.')
+    components.html(
+        """
+        <div style='display:flex; gap:8px; align-items:center;'>
+          <input id='sharelink' style='flex:1; padding:8px; border:1px solid #ddd; border-radius:8px;' readonly />
+          <button id='copybtn' style='padding:8px 12px; border-radius:8px; border:1px solid #888; background:#f7f7f7; cursor:pointer;'>Copy</button>
+        </div>
+        <div id='copystatus' style='margin-top:6px; font-size:12px; color:#2e7d32;'></div>
+        <script>
+          const link = window.location.origin + window.location.pathname + window.location.search;
+          document.getElementById('sharelink').value = link;
+          document.getElementById('copybtn').addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(link);
+              document.getElementById('copystatus').innerText = 'Copied!';
+              setTimeout(()=>document.getElementById('copystatus').innerText='', 1500);
+            } catch (e) {
+              document.getElementById('copystatus').innerText = 'Copy failed — please copy manually.';
+            }
+          });
+        </script>
+        """,
+        height=90,
+    )
+
 
 with st.sidebar.expander("🏦 PITI (Taxes & Insurance)", expanded=False):
     annual_tax = st.number_input("Annual Property Tax", min_value=0.0, value=0.0, step=500.0)
@@ -72,6 +111,7 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
             "Payment Date": st.column_config.DateColumn("Date", required=True),
             "Amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=10000.0, required=True)
         }
+        , key="custom_lump_editor"
     )
     
     # QA FIX: Empty Grid safety handler
@@ -116,13 +156,13 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
             hide_index=True,
             column_config={
                 "Effective Date": st.column_config.DateColumn("Effective Date", required=True),
-                "New Rate (%)": st.column_config.NumberColumn(
-                    "New Rate (%)", min_value=0.10, max_value=25.00, step=0.05, required=True
-                ),
+                "New Rate (%)": st.column_config.NumberColumn("New Rate (%)", min_value=0.10, max_value=25.00, step=0.05, required=True),
             },
+            key="custom_rate_editor",
         )
 
-        # Store as date-string -> rate for stable cache keys
+        # Store as date-string -> rate for stable cache keys.
+        # Engine will apply the new rate from the first payment date that is >= effective date.
         custom_rates_dict = {}
         if not edited_df.empty:
             start_dt = pd.to_datetime(start_date).normalize()
@@ -155,6 +195,9 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         except Exception:
             pass
     custom_rate_schedule.sort(key=lambda x: x[0])
+
+    # Pointer for applying effective date rate changes efficiently (O(#changes))
+    next_rate_idx = 0
     balance = float(p)
     current_date = pd.to_datetime(start_dt)
     start_datetime = pd.to_datetime(start_dt)
@@ -206,12 +249,14 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
                     current_rate += trnd_amt
                     rate_changed = True
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
-                # Apply any effective changes whose date is <= the current payment date.
-                for eff_dt, new_r in custom_rate_schedule:
-                    if eff_dt <= current_date and eff_dt > last_applied_custom_month:
-                        current_rate = new_r
-                        last_applied_custom_month = eff_dt
-                        rate_changed = True
+                # Smooth application (similar to irregular lumps):
+                # apply all rate changes whose effective date is <= current payment date, once, in order.
+                while next_rate_idx < len(custom_rate_schedule) and custom_rate_schedule[next_rate_idx][0] <= current_date:
+                    eff_dt, new_r = custom_rate_schedule[next_rate_idx]
+                    current_rate = new_r
+                    last_applied_custom_month = eff_dt
+                    next_rate_idx += 1
+                    rate_changed = True
                     
         if rate_changed:
             # QA FIX: Handle Prepayment/Tenure logic correctly based on user choice

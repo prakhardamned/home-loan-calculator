@@ -98,25 +98,63 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
         trend_months = st.number_input("Every X months", min_value=1, value=12)
         custom_rates_dict = {}
     else:
-        st.markdown("<small>Enter specific months (e.g., 18 = 1.5 years from start) and the **New Total Rate**.</small>", unsafe_allow_html=True)
-        default_schedule = pd.DataFrame([{"Month": 14, "New Rate (%)": 9.25}, {"Month": 36, "New Rate (%)": 8.50}])
-        edited_df = st.data_editor(default_schedule, num_rows="dynamic", hide_index=True)
-        
+        st.markdown(
+            "<small>Enter effective dates and the <b>New Total Rate</b>. "
+            "The new rate applies from that date onwards until the next change.</small>",
+            unsafe_allow_html=True,
+        )
+
+        # Default examples (editable)
+        default_schedule = pd.DataFrame([
+            {"Effective Date": pd.to_datetime(start_date) + pd.DateOffset(months=14), "New Rate (%)": float(annual_rate) + 0.25},
+            {"Effective Date": pd.to_datetime(start_date) + pd.DateOffset(months=36), "New Rate (%)": float(annual_rate)},
+        ])
+
+        edited_df = st.data_editor(
+            default_schedule,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "Effective Date": st.column_config.DateColumn("Effective Date", required=True),
+                "New Rate (%)": st.column_config.NumberColumn(
+                    "New Rate (%)", min_value=0.10, max_value=25.00, step=0.05, required=True
+                ),
+            },
+        )
+
+        # Store as date-string -> rate for stable cache keys
         custom_rates_dict = {}
         if not edited_df.empty:
+            start_dt = pd.to_datetime(start_date).normalize()
             for _, row in edited_df.iterrows():
-                if pd.notna(row.get("Month")) and pd.notna(row.get("New Rate (%)")):
+                if pd.notna(row.get("Effective Date")) and pd.notna(row.get("New Rate (%)")):
                     try:
-                        custom_rates_dict[int(row["Month"])] = float(row["New Rate (%)"])
-                    except ValueError:
+                        eff_dt = pd.to_datetime(row["Effective Date"]).normalize()
+                        if eff_dt < start_dt:
+                            continue
+                        custom_rates_dict[eff_dt.date().isoformat()] = float(row["New Rate (%)"])
+                    except Exception:
                         pass
+
         trend_amount = 0.0
         trend_months = 1
 
 # --- CORE MATH ENGINE ---
 @st.cache_data
-def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, rec_mo, irregular_lumps, trnd_act, rate_mode_sel, rate_action_sel, trnd_amt, trnd_mo, custom_rates):
+def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, rec_mo, irregular_lumps, trnd_act, rate_mode_sel, rate_action_sel, trnd_amt, trnd_mo, custom_rates, annual_tax, annual_ins):
     data =[]
+    # cache-safe: custom_rates may arrive as tuple of (effective_date_iso, rate) items
+    if not isinstance(custom_rates, dict):
+        custom_rates = dict(custom_rates)
+
+    # Normalise into sorted list of (effective_timestamp, rate)
+    custom_rate_schedule = []
+    for d, rr in custom_rates.items():
+        try:
+            custom_rate_schedule.append((pd.to_datetime(d).normalize(), float(rr)))
+        except Exception:
+            pass
+    custom_rate_schedule.sort(key=lambda x: x[0])
     balance = float(p)
     current_date = pd.to_datetime(start_dt)
     start_datetime = pd.to_datetime(start_dt)
@@ -145,7 +183,7 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
     last_rec_year = current_date.year - 1
     neg_amortization_flag = False
     infinite_loan_flag = False
-    last_applied_custom_month = -1
+    last_applied_custom_month = pd.Timestamp.min
     applied_lump_indices = set()
 
     period_tax = annual_tax / periods_per_year
@@ -168,10 +206,12 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
                     current_rate += trnd_amt
                     rate_changed = True
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
-                if months_elapsed in custom_rates and months_elapsed != last_applied_custom_month:
-                    current_rate = custom_rates[months_elapsed]
-                    last_applied_custom_month = months_elapsed
-                    rate_changed = True
+                # Apply any effective changes whose date is <= the current payment date.
+                for eff_dt, new_r in custom_rate_schedule:
+                    if eff_dt <= current_date and eff_dt > last_applied_custom_month:
+                        current_rate = new_r
+                        last_applied_custom_month = eff_dt
+                        rate_changed = True
                     
         if rate_changed:
             # QA FIX: Handle Prepayment/Tenure logic correctly based on user choice
@@ -226,9 +266,14 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
 
     return pd.DataFrame(data), neg_amortization_flag, infinite_loan_flag
 
+# cache-safe: stable key for Streamlit cache
+custom_rates_tuple = tuple(sorted(custom_rates_dict.items(), key=lambda x: x[0]))
+
 # --- EXECUTE ENGINE ---
-df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, {})
-df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_dict)
+df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, {}, annual_tax, annual_ins)
+df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_tuple, annual_tax, annual_ins)
+# Avoid mutating cached objects
+df_actual = df_actual.copy()
 
 # --- METRICS & ALERTS ---
 st.title("🏦 Pro Loan Architect")
@@ -291,11 +336,17 @@ with tab1:
         st.plotly_chart(fig_comp, use_container_width=True)
 
     with col_r:
-        df_actual["Cum_Outflow"] = df_actual["Payment Outflow"].cumsum()
+        df_cash = df_actual.assign(Cum_Outflow=df_actual["Payment Outflow"].cumsum())
         fig_cash = go.Figure()
-        fig_cash.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Cum_Outflow"], fill='tozeroy', name="Total Cash Outflow", line=dict(color='orange')))
+        fig_cash.add_trace(go.Scatter(x=df_cash["Date"], y=df_cash["Cum_Outflow"], fill='tozeroy', name="Total Cash Outflow", line=dict(color='orange')))
         fig_cash.update_layout(title="Total Cash Outflow (PITI)", xaxis_title="Timeline", yaxis_title="Cumulative Outflow", hovermode="x unified", height=400)
         st.plotly_chart(fig_cash, use_container_width=True)
+
+    # --- Rate Timeline (especially useful when floating-rate is enabled)
+    fig_rate = go.Figure()
+    fig_rate.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Rate (%)"], name="Rate (%)", line=dict(color="purple")))
+    fig_rate.update_layout(title="Interest Rate Timeline", xaxis_title="Timeline", yaxis_title="Rate (%)", hovermode="x unified", height=320)
+    st.plotly_chart(fig_rate, use_container_width=True)
 
 with tab2:
     st.subheader("Amortization Ledger")

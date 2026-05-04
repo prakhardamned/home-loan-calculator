@@ -8,6 +8,30 @@ from datetime import datetime, date
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Pro Loan Architect", layout="wide", initial_sidebar_state="expanded")
 
+# --- SIDEBAR_BUTTON_STYLES ---
+st.markdown(
+    """
+<style>
+  section[data-testid="stSidebar"] button {
+    font-weight: 600 !important;
+    border-radius: 12px !important;
+  }
+  /* Brighten both action buttons */
+  section[data-testid="stSidebar"] button[kind="primary"] {
+    background: #2563eb !important;
+    border: 1px solid #1d4ed8 !important;
+    color: white !important;
+  }
+  section[data-testid="stSidebar"] button[kind="secondary"] {
+    background: #e2e8f0 !important;
+    border: 1px solid #94a3b8 !important;
+    color: #0f172a !important;
+  }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 # --- UTILITY: NUMBER FORMATTING ---
 def format_num(num, system="Western"):
     if pd.isna(num) or num == float('inf'):
@@ -40,43 +64,47 @@ def get_param(key, default, cast_type):
             return default
     return default
 
-# --- ENCODING/DECODING FOR SHAREABLE URL ---
-
+# --- SHAREABLE URL ENCODERS/DECODERS ---
 def _drop_none(d: dict) -> dict:
     return {k: v for k, v in d.items() if v not in (None, "", [])}
 
-# enums: frequency, compounding, mode/action
 
 def enc_freq(freq: str) -> str:
     return "B" if freq == "Accelerated Bi-Weekly" else "M"
 
+
 def dec_freq(v: str) -> str:
     return "Accelerated Bi-Weekly" if str(v).upper() == "B" else "Monthly"
+
 
 def enc_comp(comp: str) -> str:
     return {"Monthly": "M", "Daily": "D", "Semi-Annual (Canadian)": "S"}.get(comp, "M")
 
+
 def dec_comp(v: str) -> str:
     return {"M": "Monthly", "D": "Daily", "S": "Semi-Annual (Canadian)"}.get(str(v).upper(), "Monthly")
+
 
 def enc_rate_action(a: str) -> str:
     return "R" if a.startswith("Recalculate") else "K"
 
+
 def dec_rate_action(v: str) -> str:
     return "Recalculate EMI (Loan Recasting)" if str(v).upper() == "R" else "Keep EMI Same (Adjust Tenure)"
+
 
 def enc_rate_mode(m: str) -> str:
     return "C" if m.startswith("Custom") else "T"
 
+
 def dec_rate_mode(v: str) -> str:
     return "Custom Schedule (RBI Style)" if str(v).upper() == "C" else "Predictable Trend"
 
-# schedule and lumps: compact strings
 
 def encode_rate_schedule(d: dict) -> str:
-    # {'YYYY-MM-DD': rate} -> 'YYYY-MM-DD:rate;...'
     items = sorted(d.items(), key=lambda x: x[0])
     return ";".join(f"{k}:{float(v):.4f}" for k, v in items)
+
 
 def decode_rate_schedule(s: str) -> dict:
     out = {}
@@ -90,8 +118,8 @@ def decode_rate_schedule(s: str) -> dict:
             pass
     return out
 
+
 def encode_lumps(lumps: tuple) -> str:
-    # ((Timestamp, amt), ...) -> 'YYYY-MM-DD:amt;...'
     parts = []
     for d, a in lumps:
         try:
@@ -99,6 +127,7 @@ def encode_lumps(lumps: tuple) -> str:
         except Exception:
             pass
     return ";".join(parts)
+
 
 def decode_lumps(s: str) -> tuple:
     out = []
@@ -112,14 +141,15 @@ def decode_lumps(s: str) -> tuple:
             pass
     return tuple(out)
 
-# --- DEFAULTS FROM URL (so shared links restore scenarios) ---
 
+# --- DEFAULTS FROM URL (restore scenario from shared link) ---
 principal_default = get_param("p", 5_000_000.0, float)
 annual_rate_default = get_param("r", 8.50, float)
 years_default = get_param("y", 20, int)
-start_date_default = get_param("sd", date.today().isoformat(), str)
+
+sd = get_param("sd", date.today().isoformat(), str)
 try:
-    start_date_default = pd.to_datetime(start_date_default).date()
+    start_date_default = pd.to_datetime(sd).date()
 except Exception:
     start_date_default = date.today()
 
@@ -134,7 +164,6 @@ compounding_default = dec_comp(get_param("c", "M", str))
 
 extra_payment_default = get_param("ep", 0.0, float)
 
-# Annual bonus: ab=amount@month
 recurring_lump_default = 0.0
 recurring_month_default = 12
 if "ab" in st.query_params:
@@ -145,31 +174,32 @@ if "ab" in st.query_params:
     except Exception:
         pass
 
-# Irregular lumps
 custom_lump_tuple_default = decode_lumps(st.query_params.get("ls", ""))
-# Rate schedule
 custom_rates_dict_default = decode_rate_schedule(st.query_params.get("rs", ""))
 
-rate_trend_active_default = str(st.query_params.get("rt", "0")) in ("1", "true", "True", "yes", "Y")
+rate_trend_active_default = str(st.query_params.get("rt", "0")).lower() in ("1", "true", "yes", "y")
 rate_action_default = dec_rate_action(st.query_params.get("ra", "K"))
 rate_mode_default = dec_rate_mode(st.query_params.get("rm", "T"))
 trend_amount_default = get_param("ta", 0.25, float)
 trend_months_default = get_param("tm", 12, int)
 
+
 # -------------------------------------------------
 # SIDEBAR
 # -------------------------------------------------
-st.sidebar.title("⚙️ Loan Parameters")
+st.sidebar.markdown("### ⚙️ Loan Parameters")
 
-# Reset button
-if st.sidebar.button("🔄 Reset All Inputs"):
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    st.query_params.clear()
-    st.rerun()
-
-# All inputs in a form to prevent constant reruns
+# All primary inputs in a form (prevents constant reruns)
 with st.sidebar.form("loan_form", clear_on_submit=False):
+    # Top action row: Reset + Calculate
+    b1, b2 = st.columns(2)
+    with b1:
+        reset_submit = st.form_submit_button("🔄 Reset", use_container_width=True, type="secondary")
+    with b2:
+        calc_submit = st.form_submit_button("🚀 Calculate", use_container_width=True, type="primary")
+
+    st.markdown('---')
+
     fmt_system = st.radio(
         "Number Format",
         ["Western", "Indian (Lakhs/Crores)"],
@@ -232,10 +262,18 @@ with st.sidebar.form("loan_form", clear_on_submit=False):
             trend_amount = 0.0
             trend_months = 1
 
-    submitted = st.form_submit_button("🚀 Calculate")
+# Handle Reset immediately
+if reset_submit:
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.query_params.clear()
+    st.rerun()
 
-# Data editors OUTSIDE the form for better UX, but computation is gated by 'submitted' or existing results.
-# They may still trigger reruns, but will not recompute the engine until Calculate is pressed.
+submitted = calc_submit
+
+# -------------------------------------------------
+# Editors (outside form). They can rerun, but will not recompute engine unless submitted.
+# -------------------------------------------------
 
 with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
     st.markdown("---")
@@ -290,7 +328,7 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
     else:
         edited_rates = pd.DataFrame(columns=["Effective Date", "New Rate (%)"])
 
-# Build advanced inputs from editors (stable, even if empty)
+# Build advanced inputs from editors
 custom_lump_sums = []
 if edited_lumps is not None and not edited_lumps.empty:
     for _, row in edited_lumps.iterrows():
@@ -311,10 +349,8 @@ if edited_rates is not None and not edited_rates.empty:
             except Exception:
                 pass
 
-# cache-safe stable tuples
 custom_rates_tuple = tuple(sorted(custom_rates_dict.items(), key=lambda x: x[0]))
 
-# --- SHAREABLE LINK: update URL only when Calculate is pressed (or first time results exist) ---
 
 def update_url_params():
     params = {
@@ -339,14 +375,13 @@ def update_url_params():
     }
     st.query_params.update(_drop_none(params))
 
-# Always show share box, but tell users to click calculate to refresh it
 with st.sidebar.expander("🔗 Shareable Link", expanded=False):
-    st.caption("Click **Calculate** to refresh this link with your latest scenario. Use **Reset** for a clean slate.")
+    st.caption("Press **Calculate** to refresh the link with the latest scenario.")
     components.html(
         """
         <div style='display:flex; gap:8px; align-items:center;'>
           <input id='sharelink' style='flex:1; padding:8px; border:1px solid #ddd; border-radius:8px;' readonly />
-          <button id='copybtn' style='padding:8px 12px; border-radius:8px; border:1px solid #888; background:#f7f7f7; cursor:pointer;'>Copy</button>
+          <button id='copybtn' style='padding:8px 12px; border-radius:10px; border:1px solid #888; background:#f7f7f7; cursor:pointer;'>Copy</button>
         </div>
         <div id='copystatus' style='margin-top:6px; font-size:12px; color:#2e7d32;'></div>
         <script>
@@ -365,6 +400,7 @@ with st.sidebar.expander("🔗 Shareable Link", expanded=False):
         """,
         height=90,
     )
+
 
 # -------------------------------------------------
 # CORE MATH ENGINE
@@ -393,7 +429,6 @@ def run_amortization(
     data = []
     balance = float(p)
     current_date = pd.to_datetime(start_dt)
-    start_datetime = pd.to_datetime(start_dt)
 
     periods_per_year = 26 if freq == "Accelerated Bi-Weekly" else 12
     total_periods = yrs * periods_per_year
@@ -428,7 +463,6 @@ def run_amortization(
             return princ / periods_left if periods_left > 0 else 0
         return princ * (rate_per_period * (1 + rate_per_period) ** periods_left) / ((1 + rate_per_period) ** periods_left - 1)
 
-    # base payment
     base_monthly_emi = get_emi(p, get_period_rate(r_annual) if comp != "Monthly" else (r_annual / 100 / 12), yrs * 12)
     base_payment = base_monthly_emi if periods_per_year == 12 else base_monthly_emi / 2
 
@@ -436,12 +470,12 @@ def run_amortization(
     last_rec_year = current_date.year - 1
     neg_amortization_flag = False
     infinite_loan_flag = False
+
     applied_lump_indices = set()
 
     period_tax = annual_tax / periods_per_year
     period_ins = annual_ins / periods_per_year
 
-    # Predictable trend interval in periods
     trend_period_interval = int(round(trnd_mo * (26 / 12))) if periods_per_year == 26 else int(trnd_mo)
 
     for period in range(1, failsafe_cap):
@@ -452,14 +486,12 @@ def run_amortization(
 
         rate_changed = False
 
-        # --- FLOATING RATE ENGINE ---
         if trnd_act:
             if rate_mode_sel == "Predictable Trend":
                 if period > 1 and (period - 1) % max(1, trend_period_interval) == 0:
                     current_rate += trnd_amt
                     rate_changed = True
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
-                # Option A: apply from first payment date that is >= effective date
                 while next_rate_idx < len(custom_rate_schedule) and custom_rate_schedule[next_rate_idx][0] <= current_date:
                     _, new_r = custom_rate_schedule[next_rate_idx]
                     current_rate = new_r
@@ -473,16 +505,14 @@ def run_amortization(
 
         period_r = get_period_rate(current_rate)
         interest = balance * period_r
-
         principal_pay = base_payment - interest
         actual_principal = principal_pay + ext_pay
 
-        # Annual recurring bonus
         if rec_lump > 0 and current_date.month == rec_mo and current_date.year > last_rec_year:
             actual_principal += rec_lump
             last_rec_year = current_date.year
 
-        # Irregular lumps: apply once when date reached
+        # Apply irregular lumps once
         for i, (l_date, l_amt) in enumerate(irregular_lumps):
             if i not in applied_lump_indices and current_date >= l_date:
                 actual_principal += l_amt
@@ -518,19 +548,16 @@ def run_amortization(
 
     return pd.DataFrame(data), neg_amortization_flag, infinite_loan_flag
 
+
 # -------------------------------------------------
 # EXECUTION CONTROL
 # -------------------------------------------------
-
-# Keep last computed results to avoid recompute on editor reruns
 if "results" not in st.session_state:
     st.session_state["results"] = None
 
 if submitted:
-    # Update URL with full scenario now
     update_url_params()
 
-    # Baseline vs actual
     df_base, _, _ = run_amortization(
         principal,
         annual_rate,
@@ -580,21 +607,21 @@ if submitted:
         "is_inf": is_infinite,
     }
 
-# If no results yet, guide user
 if st.session_state["results"] is None:
     st.title("🏦 Pro Loan Architect")
     st.info("Set your parameters in the sidebar, then press **Calculate**.")
     st.stop()
 
-# -------------------------------------------------
-# DISPLAY
-# -------------------------------------------------
 res = st.session_state["results"]
 df_base = res["df_base"]
 df_actual = res["df_actual"]
 has_neg_amortization = res["has_neg"]
 is_infinite = res["is_inf"]
 
+
+# -------------------------------------------------
+# METRICS & ALERTS
+# -------------------------------------------------
 st.title("🏦 Pro Loan Architect")
 
 if has_neg_amortization:
@@ -639,32 +666,29 @@ st.markdown("---")
 tab1, tab2 = st.tabs(["📊 Visual Analytics", "📑 Detailed Schedule"])
 
 with tab1:
-    df_plot_base = df_base
-    df_plot_actual = df_actual
-
     fig_bal = go.Figure()
-    fig_bal.add_trace(go.Scatter(x=df_plot_base["Date"], y=df_plot_base["Remaining Balance"], name="Standard Balance", line=dict(color='gray', dash='dash')))
-    fig_bal.add_trace(go.Scatter(x=df_plot_actual["Date"], y=df_plot_actual["Remaining Balance"], fill='tozeroy', name="Optimised Balance", line=dict(color='royalblue' if not has_neg_amortization else 'crimson')))
+    fig_bal.add_trace(go.Scatter(x=df_base["Date"], y=df_base["Remaining Balance"], name="Standard Balance", line=dict(color='gray', dash='dash')))
+    fig_bal.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Remaining Balance"], fill='tozeroy', name="Optimised Balance", line=dict(color='royalblue' if not has_neg_amortization else 'crimson')))
     fig_bal.update_layout(title="Loan Paydown Trajectory", xaxis_title="Timeline", yaxis_title="Balance", hovermode="x unified", height=450)
     st.plotly_chart(fig_bal, use_container_width=True)
 
     col_l, col_r = st.columns(2)
     with col_l:
         fig_comp = go.Figure()
-        fig_comp.add_trace(go.Scatter(x=df_plot_actual["Date"], y=df_plot_actual["Interest"], name="Interest", line=dict(color='tomato')))
-        fig_comp.add_trace(go.Scatter(x=df_plot_actual["Date"], y=df_plot_actual["Principal"], name="Principal", line=dict(color='mediumseagreen')))
+        fig_comp.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Interest"], name="Interest", line=dict(color='tomato')))
+        fig_comp.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Principal"], name="Principal", line=dict(color='mediumseagreen')))
         fig_comp.update_layout(title="Principal vs Interest", xaxis_title="Timeline", yaxis_title="Amount per Period", hovermode="x unified", height=400)
         st.plotly_chart(fig_comp, use_container_width=True)
 
     with col_r:
-        df_cash = df_plot_actual.assign(Cum_Outflow=df_plot_actual["Payment Outflow"].cumsum())
+        df_cash = df_actual.assign(Cum_Outflow=df_actual["Payment Outflow"].cumsum())
         fig_cash = go.Figure()
         fig_cash.add_trace(go.Scatter(x=df_cash["Date"], y=df_cash["Cum_Outflow"], fill='tozeroy', name="Total Cash Outflow", line=dict(color='orange')))
         fig_cash.update_layout(title="Total Cash Outflow (PITI)", xaxis_title="Timeline", yaxis_title="Cumulative Outflow", hovermode="x unified", height=400)
         st.plotly_chart(fig_cash, use_container_width=True)
 
     fig_rate = go.Figure()
-    fig_rate.add_trace(go.Scatter(x=df_plot_actual["Date"], y=df_plot_actual["Rate (%)"], name="Rate (%)", line=dict(color='purple')))
+    fig_rate.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Rate (%)"], name="Rate (%)", line=dict(color='purple')))
     fig_rate.update_layout(title="Interest Rate Timeline", xaxis_title="Timeline", yaxis_title="Rate (%)", hovermode="x unified", height=320)
     st.plotly_chart(fig_rate, use_container_width=True)
 

@@ -8,24 +8,27 @@ from datetime import datetime, date
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Pro Loan Architect", layout="wide", initial_sidebar_state="expanded")
 
-# --- SIDEBAR_BUTTON_STYLES ---
+# --- SIDEBAR_BUTTON_STYLES (consistent button sizes + slight highlight) ---
 st.markdown(
     """
 <style>
   section[data-testid="stSidebar"] button {
     font-weight: 600 !important;
     border-radius: 12px !important;
+    height: 42px !important;
+    padding: 0.25rem 0.75rem !important;
   }
-  /* Brighten both action buttons */
   section[data-testid="stSidebar"] button[kind="primary"] {
     background: #2563eb !important;
     border: 1px solid #1d4ed8 !important;
     color: white !important;
+    box-shadow: 0 1px 6px rgba(37,99,235,0.25) !important;
   }
   section[data-testid="stSidebar"] button[kind="secondary"] {
     background: #e2e8f0 !important;
     border: 1px solid #94a3b8 !important;
     color: #0f172a !important;
+    box-shadow: 0 1px 6px rgba(15,23,42,0.10) !important;
   }
 </style>
 """,
@@ -183,15 +186,13 @@ rate_mode_default = dec_rate_mode(st.query_params.get("rm", "T"))
 trend_amount_default = get_param("ta", 0.25, float)
 trend_months_default = get_param("tm", 12, int)
 
-
 # -------------------------------------------------
 # SIDEBAR
 # -------------------------------------------------
 st.sidebar.markdown("### ⚙️ Loan Parameters")
 
-# All primary inputs in a form (prevents constant reruns)
 with st.sidebar.form("loan_form", clear_on_submit=False):
-    # Top action row: Reset + Calculate
+    # Top action row: Reset + Calculate (same width/height)
     b1, b2 = st.columns(2)
     with b1:
         reset_submit = st.form_submit_button("🔄 Reset", use_container_width=True, type="secondary")
@@ -229,8 +230,9 @@ with st.sidebar.form("loan_form", clear_on_submit=False):
             index=["Monthly", "Daily", "Semi-Annual (Canadian)"].index(compounding_default),
         )
 
-    with st.expander("🚀 Prepayment Strategies", expanded=False):
-        st.markdown("**1. Regular Prepayments**")
+    # NOTE: renamed to avoid duplicate sidebar headings
+    with st.expander("🚀 Regular Prepayments", expanded=False):
+        st.markdown("**Regular Prepayments**")
         extra_payment = st.number_input("Extra per Payment", min_value=0.0, value=float(extra_payment_default), step=1000.0)
         recurring_lump = st.number_input("Annual Bonus Lump Sum", min_value=0.0, value=float(recurring_lump_default), step=10000.0)
         recurring_month = st.selectbox(
@@ -240,7 +242,8 @@ with st.sidebar.form("loan_form", clear_on_submit=False):
             format_func=lambda x: datetime(2000, x, 1).strftime('%B'),
         )
 
-    with st.expander("📈 Floating Rate / Trends", expanded=False):
+    # NOTE: renamed to avoid duplicate sidebar headings
+    with st.expander("📈 Floating Rate Settings", expanded=False):
         rate_trend_active = st.checkbox("Enable Interest Rate Changes", value=rate_trend_active_default)
         rate_action = st.radio(
             "When Rates Change, the Bank will:",
@@ -272,12 +275,12 @@ if reset_submit:
 submitted = calc_submit
 
 # -------------------------------------------------
-# Editors (outside form). They can rerun, but will not recompute engine unless submitted.
+# Editors (outside form) — ONLY ONCE (no duplicates)
 # -------------------------------------------------
 
+# Prepayment editor for irregular lumps
 with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
-    st.markdown("---")
-    st.markdown("**2. Irregular / Random Lump Sums**")
+    st.markdown("**Irregular / Random Lump Sums**")
 
     if custom_lump_tuple_default:
         default_lumps = pd.DataFrame([{"Payment Date": d.date(), "Amount": float(a)} for d, a in custom_lump_tuple_default])
@@ -295,6 +298,7 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
         },
     )
 
+# Floating schedule editor (RBI style)
 with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
     if rate_mode == "Custom Schedule (RBI Style)":
         st.markdown(
@@ -434,11 +438,9 @@ def run_amortization(
     total_periods = yrs * periods_per_year
     failsafe_cap = total_periods * 3
 
-    # custom_rates may be tuple of (effective_date_iso, rate)
     if not isinstance(custom_rates, dict):
         custom_rates = dict(custom_rates)
 
-    # sorted effective schedule for smooth application (Option A)
     custom_rate_schedule = []
     for d, rr in custom_rates.items():
         try:
@@ -512,7 +514,6 @@ def run_amortization(
             actual_principal += rec_lump
             last_rec_year = current_date.year
 
-        # Apply irregular lumps once
         for i, (l_date, l_amt) in enumerate(irregular_lumps):
             if i not in applied_lump_indices and current_date >= l_date:
                 actual_principal += l_amt
@@ -617,7 +618,6 @@ df_base = res["df_base"]
 df_actual = res["df_actual"]
 has_neg_amortization = res["has_neg"]
 is_infinite = res["is_inf"]
-
 
 # -------------------------------------------------
 # METRICS & ALERTS

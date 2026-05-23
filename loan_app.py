@@ -41,7 +41,7 @@ fmt_system = st.sidebar.radio("Number Format",["Western", "Indian (Lakhs/Crores)
 
 st.sidebar.header("📝 Basic Details")
 principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 5000000.0, float), step=100000.0)
-annual_rate = st.sidebar.number_input("Initial Interest Rate (%)", min_value=0.10, max_value=25.00, value=get_param("r", 8.50, float), step=0.05, format="%.2f")
+annual_rate = st.sidebar.slider("Initial Interest Rate (%)", 0.10, 25.00, get_param("r", 8.50, float), 0.01, format="%.2f")
 years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
 start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 
@@ -74,7 +74,6 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
         }
     )
     
-    # QA FIX: Empty Grid safety handler
     custom_lump_sums =[]
     if not edited_lumps.empty:
         for _, row in edited_lumps.iterrows():
@@ -85,7 +84,6 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
 with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
     rate_trend_active = st.checkbox("Enable Interest Rate Changes")
     
-    # QA FIX: Business Logic for Indian Banking (RLLR) vs Western Banking
     rate_action = st.radio("When Rates Change, the Bank will:",[
         "Keep EMI Same (Adjust Tenure)", 
         "Recalculate EMI (Loan Recasting)"
@@ -96,20 +94,29 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
     if rate_mode == "Predictable Trend":
         trend_amount = st.number_input("Increase rate by (%)", value=0.25, step=0.05)
         trend_months = st.number_input("Every X months", min_value=1, value=12)
-        custom_rates_dict = {}
+        custom_rates_tuple = ()
     else:
-        st.markdown("<small>Enter specific months (e.g., 18 = 1.5 years from start) and the **New Total Rate**.</small>", unsafe_allow_html=True)
-        default_schedule = pd.DataFrame([{"Month": 14, "New Rate (%)": 9.25}, {"Month": 36, "New Rate (%)": 8.50}])
-        edited_df = st.data_editor(default_schedule, num_rows="dynamic", hide_index=True)
+        st.markdown("<small>Enter the exact date the rate changed, and the **New Total Rate (%)**.</small>", unsafe_allow_html=True)
+        default_schedule = pd.DataFrame([{"Change Date": date.today(), "New Rate (%)": 8.50}])
+        edited_rate_df = st.data_editor(
+            default_schedule, 
+            num_rows="dynamic", 
+            hide_index=True,
+            column_config={
+                "Change Date": st.column_config.DateColumn("Date", required=True),
+                "New Rate (%)": st.column_config.NumberColumn("New Rate (%)", min_value=0.1, step=0.05, required=True, format="%.2f")
+            }
+        )
         
-        custom_rates_dict = {}
-        if not edited_df.empty:
-            for _, row in edited_df.iterrows():
-                if pd.notna(row.get("Month")) and pd.notna(row.get("New Rate (%)")):
-                    try:
-                        custom_rates_dict[int(row["Month"])] = float(row["New Rate (%)"])
-                    except ValueError:
-                        pass
+        custom_rates_list = []
+        if not edited_rate_df.empty:
+            for _, row in edited_rate_df.iterrows():
+                if pd.notna(row.get("Change Date")) and pd.notna(row.get("New Rate (%)")):
+                    custom_rates_list.append((pd.to_datetime(row["Change Date"]), float(row["New Rate (%)"])))
+        
+        # Sort the dates chronologically so the math engine reads them perfectly
+        custom_rates_list.sort(key=lambda x: x[0])
+        custom_rates_tuple = tuple(custom_rates_list)
         trend_amount = 0.0
         trend_months = 1
 
@@ -119,7 +126,6 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
     data =[]
     balance = float(p)
     current_date = pd.to_datetime(start_dt)
-    start_datetime = pd.to_datetime(start_dt)
     
     periods_per_year = 26 if freq == "Accelerated Bi-Weekly" else 12
     total_periods = yrs * periods_per_year
@@ -145,7 +151,6 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
     last_rec_year = current_date.year - 1
     neg_amortization_flag = False
     infinite_loan_flag = False
-    last_applied_custom_month = -1
     applied_lump_indices = set()
 
     period_tax = annual_tax / periods_per_year
@@ -158,7 +163,6 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         else:
             current_date += pd.Timedelta(days=14)
             
-        months_elapsed = (current_date.year - start_datetime.year) * 12 + (current_date.month - start_datetime.month)
         rate_changed = False
         
         # --- FLOATING RATE ENGINE ---
@@ -168,18 +172,22 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
                     current_rate += trnd_amt
                     rate_changed = True
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
-                if months_elapsed in custom_rates and months_elapsed != last_applied_custom_month:
-                    current_rate = custom_rates[months_elapsed]
-                    last_applied_custom_month = months_elapsed
+                applicable_rate = current_rate
+                # Scan custom dates to find the most recently applicable rate
+                for r_dt, r_pct in custom_rates:
+                    if current_date >= r_dt:
+                        applicable_rate = r_pct
+                
+                # If a new rate triggers, apply it
+                if applicable_rate != current_rate:
+                    current_rate = applicable_rate
                     rate_changed = True
                     
         if rate_changed:
-            # QA FIX: Handle Prepayment/Tenure logic correctly based on user choice
             if rate_action_sel == "Recalculate EMI (Loan Recasting)":
                 rem_periods = total_periods - period + 1
                 if rem_periods > 0 and balance > 0:
                     base_payment = get_emi(balance, get_period_rate(current_rate), rem_periods)
-            # If "Keep EMI Same", we explicitly do nothing to base_payment.
         
         period_r = get_period_rate(current_rate)
         interest = balance * period_r
@@ -220,15 +228,14 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         if balance <= 0:
             break
             
-        # QA FIX: Catch if loan hits failsafe cap without paying off
         if period == failsafe_cap - 1 and balance > 0:
             infinite_loan_flag = True
 
     return pd.DataFrame(data), neg_amortization_flag, infinite_loan_flag
 
 # --- EXECUTE ENGINE ---
-df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, {})
-df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_dict)
+df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, ())
+df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_tuple)
 
 # --- METRICS & ALERTS ---
 st.title("🏦 Pro Loan Architect")
@@ -253,7 +260,6 @@ st.markdown("### 🎯 Scenario Summary")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Original Total Interest", format_num(base_interest, fmt_system))
 
-# QA FIX: Mask output if loan is infinite
 if is_infinite:
     c2.metric("Actual Total Interest", "Infinite 🚨")
     c3.metric("Status", "Will Never Pay Off", "-∞")

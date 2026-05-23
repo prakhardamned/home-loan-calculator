@@ -6,6 +6,27 @@ from datetime import datetime, date
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Pro Loan Architect", layout="wide", initial_sidebar_state="expanded")
 
+# --- CUSTOM CSS (UI UPGRADE) ---
+st.markdown("""
+    <style>
+    /* Adds a subtle hover 'pop' effect to the metric cards */
+    div[data-testid="metric-container"] {
+        transition: transform 0.2s ease-in-out;
+        padding: 10px;
+        border-radius: 8px;
+    }
+    div[data-testid="metric-container"]:hover {
+        transform: scale(1.03);
+        background-color: rgba(150, 150, 150, 0.1);
+    }
+    /* Make the top header look a bit more premium */
+    .premium-header {
+        font-weight: 700;
+        margin-bottom: -15px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- UTILITY: NUMBER FORMATTING ---
 def format_num(num, system="Western"):
     if pd.isna(num) or num == float('inf'):
@@ -114,7 +135,6 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
                 if pd.notna(row.get("Change Date")) and pd.notna(row.get("New Rate (%)")):
                     custom_rates_list.append((pd.to_datetime(row["Change Date"]), float(row["New Rate (%)"])))
         
-        # Sort the dates chronologically so the math engine reads them perfectly
         custom_rates_list.sort(key=lambda x: x[0])
         custom_rates_tuple = tuple(custom_rates_list)
         trend_amount = 0.0
@@ -173,12 +193,10 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
                     rate_changed = True
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
                 applicable_rate = current_rate
-                # Scan custom dates to find the most recently applicable rate
                 for r_dt, r_pct in custom_rates:
                     if current_date >= r_dt:
                         applicable_rate = r_pct
                 
-                # If a new rate triggers, apply it
                 if applicable_rate != current_rate:
                     current_rate = applicable_rate
                     rate_changed = True
@@ -195,7 +213,6 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         principal_pay = base_payment - interest
         actual_principal = principal_pay + ext_pay
         
-        # Process Prepayments
         if rec_lump > 0 and current_date.month == rec_mo and current_date.year > last_rec_year:
             actual_principal += rec_lump
             last_rec_year = current_date.year
@@ -237,8 +254,12 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
 df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, ())
 df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_tuple)
 
-# --- METRICS & ALERTS ---
-st.title("🏦 Pro Loan Architect")
+# UI UX UPGRADE: Micro-interaction toast
+st.toast("✅ Loan Engine Recalculated!")
+
+# --- UI DASHBOARD ---
+st.markdown('<h1 class="premium-header">🏦 Pro Loan Architect</h1>', unsafe_allow_html=True)
+st.caption("Advanced Real Estate Amortization & Cash Flow Engine")
 
 if has_neg_amortization:
     st.error("⚠️ **CRITICAL WARNING: Negative Amortization Detected!** Your interest rate has climbed so high that your payments no longer cover the monthly interest. Your loan balance is actually *growing*.")
@@ -256,30 +277,32 @@ month_diff = (payoff_date_base.year - payoff_date_actual.year) * 12 + (payoff_da
 cross_over_df = df_actual[df_actual["Principal"] > df_actual["Interest"]]
 cross_over_date = cross_over_df.iloc[0]["Date"].strftime('%B %Y') if not cross_over_df.empty else None
 
-st.markdown("### 🎯 Scenario Summary")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Original Total Interest", format_num(base_interest, fmt_system))
+# UI UX UPGRADE: Elevated Container for Metrics
+with st.container(border=True):
+    st.markdown("### 🎯 Scenario Summary")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Original Total Interest", format_num(base_interest, fmt_system))
 
-if is_infinite:
-    c2.metric("Actual Total Interest", "Infinite 🚨")
-    c3.metric("Status", "Will Never Pay Off", "-∞")
-    c4.metric("Actual Payoff Date", "NEVER")
-else:
-    c2.metric("Actual Total Interest", format_num(actual_interest, fmt_system))
-    if interest_saved >= 0:
-        c3.metric("Interest Saved 🎉", format_num(interest_saved, fmt_system), f"+{format_num(interest_saved, fmt_system)}")
-        c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Saved {month_diff} mos")
+    if is_infinite:
+        c2.metric("Actual Total Interest", "Infinite 🚨")
+        c3.metric("Status", "Will Never Pay Off", "-∞")
+        c4.metric("Actual Payoff Date", "NEVER")
     else:
-        c3.metric("Extra Interest Paid 📉", format_num(abs(interest_saved), fmt_system), f"-{format_num(abs(interest_saved), fmt_system)}")
-        c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Extended by {abs(month_diff)} mos")
+        c2.metric("Actual Total Interest", format_num(actual_interest, fmt_system))
+        if interest_saved >= 0:
+            c3.metric("Interest Saved 🎉", format_num(interest_saved, fmt_system), f"+{format_num(interest_saved, fmt_system)}")
+            c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Saved {month_diff} mos")
+        else:
+            c3.metric("Extra Interest Paid 📉", format_num(abs(interest_saved), fmt_system), f"-{format_num(abs(interest_saved), fmt_system)}")
+            c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Extended by {abs(month_diff)} mos")
 
 if cross_over_date and not has_neg_amortization and not is_infinite:
     st.success(f"🔥 **Cross-Over Milestone:** In **{cross_over_date}**, you will officially start paying more toward your Home's Principal than to the Bank's Interest!")
 
-st.markdown("---")
+st.divider()
 
 # --- UI CHARTS ---
-tab1, tab2 = st.tabs(["📊 Visual Analytics", "📑 Detailed Schedule"])
+tab1, tab2 = st.tabs(["📈 Visual Analytics", "📑 Detailed Ledger"])
 
 with tab1:
     fig_bal = go.Figure()
@@ -304,7 +327,7 @@ with tab1:
         st.plotly_chart(fig_cash, use_container_width=True)
 
 with tab2:
-    st.subheader("Amortization Ledger")
+    st.subheader("Interactive Amortization Ledger")
     display_df = df_actual.copy()
     display_cols =["Payment Outflow", "Interest", "Principal", "Taxes & Ins", "Remaining Balance"]
     for col in display_cols:

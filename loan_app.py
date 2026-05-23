@@ -2,36 +2,53 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, date
+from fpdf import FPDF
+import io
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Pro Loan Architect", layout="wide", initial_sidebar_state="expanded")
 
-# --- CUSTOM CSS (UI UPGRADE) ---
+# --- CUSTOM CSS (Google Stitch / Material Design Upgrade) ---
 st.markdown("""
     <style>
-    /* Adds a subtle hover 'pop' effect to the metric cards */
+    /* Google Material-style elevated cards */
     div[data-testid="metric-container"] {
-        transition: transform 0.2s ease-in-out;
-        padding: 10px;
-        border-radius: 8px;
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        transition: box-shadow 0.2s ease, transform 0.2s ease;
     }
     div[data-testid="metric-container"]:hover {
-        transform: scale(1.03);
-        background-color: rgba(150, 150, 150, 0.1);
+        transform: translateY(-2px);
+        box-shadow: 0 8px 15px rgba(0,0,0,0.1);
     }
-    /* Make the top header look a bit more premium */
+    
+    /* Clean Top Header */
     .premium-header {
+        font-family: 'Google Sans', Roboto, sans-serif;
         font-weight: 700;
+        color: #1a73e8; /* Google Blue */
         margin-bottom: -15px;
+    }
+    
+    /* Dark mode adjustments for cards */
+    @media (prefers-color-scheme: dark) {
+        div[data-testid="metric-container"] {
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+        }
+        .premium-header {
+            color: #8ab4f8;
+        }
     }
     </style>
 """, unsafe_allow_html=True)
 
 # --- UTILITY: NUMBER FORMATTING ---
 def format_num(num, system="Western"):
-    if pd.isna(num) or num == float('inf'):
-        return "N/A"
-        
+    if pd.isna(num) or num == float('inf'): return "N/A"
     if system == "Indian (Lakhs/Crores)":
         is_negative = num < 0
         num_str = f"{abs(num):.2f}"
@@ -46,26 +63,95 @@ def format_num(num, system="Western"):
         return f"-{res}" if is_negative else res
     return f"{num:,.2f}"
 
-# --- URL PARAMETER MANAGEMENT ---
 def get_param(key, default, cast_type):
     if key in st.query_params:
-        try:
-            return cast_type(st.query_params[key])
-        except ValueError:
-            return default
+        try: return cast_type(st.query_params[key])
+        except ValueError: return default
     return default
+
+# --- PDF GENERATOR (Yearly Executive Summary) ---
+def generate_pdf_report(df, principal, act_interest, saved_interest, payoff_str, fmt):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 18)
+    pdf.set_text_color(26, 115, 232) # Google Blue
+    pdf.cell(0, 10, "Pro Loan Architect - Amortization Report", ln=True, align='C')
+    pdf.ln(10)
+
+    # Summary Section
+    pdf.set_font("helvetica", "B", 12)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, "Executive Summary", ln=True)
+    pdf.set_font("helvetica", "", 11)
+    pdf.cell(0, 8, f"Original Loan Amount: {format_num(principal, fmt)}", ln=True)
+    pdf.cell(0, 8, f"Total Interest Paid: {format_num(act_interest, fmt)}", ln=True)
+    if saved_interest > 0:
+        pdf.set_text_color(46, 139, 87) # Green
+        pdf.cell(0, 8, f"Total Interest Saved vs Standard: {format_num(saved_interest, fmt)}", ln=True)
+        pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 8, f"Estimated Payoff Date: {payoff_str}", ln=True)
+    pdf.ln(10)
+
+    # Yearly Aggregation for cleaner PDF
+    df['Year'] = pd.to_datetime(df['Date']).dt.year
+    df_yearly = df.groupby('Year').agg({
+        'Payment Outflow': 'sum',
+        'Interest': 'sum',
+        'Principal': 'sum',
+        'Remaining Balance': 'last'
+    }).reset_index()
+
+    # Table Header
+    pdf.set_font("helvetica", "B", 10)
+    pdf.set_fill_color(240, 240, 240)
+    col_widths = [25, 40, 40, 40, 45]
+    headers = ["Year", "Total Paid", "Interest", "Principal", "End Balance"]
+    for i, header in enumerate(headers):
+        pdf.cell(col_widths[i], 10, header, border=1, fill=True, align='C')
+    pdf.ln()
+
+    # Table Rows
+    pdf.set_font("helvetica", "", 9)
+    for _, row in df_yearly.iterrows():
+        pdf.cell(col_widths[0], 8, str(int(row['Year'])), border=1, align='C')
+        pdf.cell(col_widths[1], 8, format_num(row['Payment Outflow'], fmt), border=1, align='R')
+        pdf.cell(col_widths[2], 8, format_num(row['Interest'], fmt), border=1, align='R')
+        pdf.cell(col_widths[3], 8, format_num(row['Principal'], fmt), border=1, align='R')
+        pdf.cell(col_widths[4], 8, format_num(row['Remaining Balance'], fmt), border=1, align='R')
+        pdf.ln()
+
+    return bytes(pdf.output())
 
 # --- SIDEBAR: INPUTS & SETTINGS ---
 st.sidebar.title("⚙️ Loan Parameters")
 
+app_mode = st.sidebar.radio("App Mode", ["Standard Loan Calculator", "Reverse Affordability"], horizontal=True, help="Switch between calculating an EMI, or finding out how much house you can afford based on your target EMI.")
+st.sidebar.divider()
+
 fmt_system = st.sidebar.radio("Number Format",["Western", "Indian (Lakhs/Crores)"], index=1, horizontal=True)
 
 st.sidebar.header("📝 Basic Details")
-principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 5000000.0, float), step=100000.0)
-annual_rate = st.sidebar.slider("Initial Interest Rate (%)", 0.10, 25.00, get_param("r", 8.50, float), 0.01, format="%.2f")
-years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
-start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 
+# UI UPGRADE: Changed slider to a number_input for precision typing
+annual_rate = st.sidebar.number_input("Initial Interest Rate (%)", min_value=0.10, max_value=50.00, value=get_param("r", 8.50, float), step=0.05, format="%.2f")
+years = st.sidebar.slider("Loan Term (Years)", 1, 50, get_param("y", 20, int))
+
+# --- REVERSE AFFORDABILITY LOGIC ---
+if app_mode == "Reverse Affordability":
+    target_emi = st.sidebar.number_input("Target Monthly EMI", min_value=1000.0, value=50000.0, step=5000.0)
+    down_payment = st.sidebar.number_input("Available Downpayment", min_value=0.0, value=1000000.0, step=100000.0)
+    
+    r_monthly = (annual_rate / 100) / 12
+    n_months = years * 12
+    if r_monthly > 0:
+        principal = target_emi * (((1 + r_monthly)**n_months - 1) / (r_monthly * (1 + r_monthly)**n_months))
+    else:
+        principal = target_emi * n_months
+else:
+    principal = st.sidebar.number_input("Loan Amount", min_value=1000.0, value=get_param("p", 5000000.0, float), step=100000.0)
+    down_payment = 0.0
+
+start_date = st.sidebar.date_input("Loan Start Date", value=date.today())
 st.query_params.update({"p": principal, "r": annual_rate, "y": years})
 
 with st.sidebar.expander("🏦 PITI (Taxes & Insurance)", expanded=False):
@@ -85,15 +171,10 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
     st.markdown("---")
     st.markdown("**2. Irregular / Random Lump Sums**")
     default_lumps = pd.DataFrame([{"Payment Date": date.today(), "Amount": 0.0}])
-    edited_lumps = st.data_editor(
-        default_lumps, 
-        num_rows="dynamic", 
-        hide_index=True,
-        column_config={
-            "Payment Date": st.column_config.DateColumn("Date", required=True),
-            "Amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=10000.0, required=True)
-        }
-    )
+    edited_lumps = st.data_editor(default_lumps, num_rows="dynamic", hide_index=True, column_config={
+        "Payment Date": st.column_config.DateColumn("Date", required=True),
+        "Amount": st.column_config.NumberColumn("Amount", min_value=0.0, step=10000.0, required=True)
+    })
     
     custom_lump_sums =[]
     if not edited_lumps.empty:
@@ -104,12 +185,7 @@ with st.sidebar.expander("🚀 Prepayment Strategies", expanded=False):
 
 with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
     rate_trend_active = st.checkbox("Enable Interest Rate Changes")
-    
-    rate_action = st.radio("When Rates Change, the Bank will:",[
-        "Keep EMI Same (Adjust Tenure)", 
-        "Recalculate EMI (Loan Recasting)"
-    ], help="Indian banks default to keeping your EMI the same and extending your tenure when rates rise.")
-
+    rate_action = st.radio("When Rates Change, the Bank will:",["Keep EMI Same (Adjust Tenure)", "Recalculate EMI (Loan Recasting)"])
     rate_mode = st.radio("Rate Change Mode",["Predictable Trend", "Custom Schedule (RBI Style)"])
     
     if rate_mode == "Predictable Trend":
@@ -117,24 +193,18 @@ with st.sidebar.expander("📈 Floating Rate / Trends", expanded=False):
         trend_months = st.number_input("Every X months", min_value=1, value=12)
         custom_rates_tuple = ()
     else:
-        st.markdown("<small>Enter the exact date the rate changed, and the **New Total Rate (%)**.</small>", unsafe_allow_html=True)
+        st.markdown("<small>Enter exact dates and the **New Total Rate (%)**.</small>", unsafe_allow_html=True)
         default_schedule = pd.DataFrame([{"Change Date": date.today(), "New Rate (%)": 8.50}])
-        edited_rate_df = st.data_editor(
-            default_schedule, 
-            num_rows="dynamic", 
-            hide_index=True,
-            column_config={
-                "Change Date": st.column_config.DateColumn("Date", required=True),
-                "New Rate (%)": st.column_config.NumberColumn("New Rate (%)", min_value=0.1, step=0.05, required=True, format="%.2f")
-            }
-        )
+        edited_rate_df = st.data_editor(default_schedule, num_rows="dynamic", hide_index=True, column_config={
+            "Change Date": st.column_config.DateColumn("Date", required=True),
+            "New Rate (%)": st.column_config.NumberColumn("New Rate (%)", min_value=0.1, step=0.05, required=True, format="%.2f")
+        })
         
         custom_rates_list = []
         if not edited_rate_df.empty:
             for _, row in edited_rate_df.iterrows():
                 if pd.notna(row.get("Change Date")) and pd.notna(row.get("New Rate (%)")):
                     custom_rates_list.append((pd.to_datetime(row["Change Date"]), float(row["New Rate (%)"])))
-        
         custom_rates_list.sort(key=lambda x: x[0])
         custom_rates_tuple = tuple(custom_rates_list)
         trend_amount = 0.0
@@ -153,12 +223,9 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
     
     def get_period_rate(annual_pct):
         r = annual_pct / 100
-        if comp == "Monthly":
-            return r / 12 if periods_per_year == 12 else ((1 + r/12)**(12/26) - 1)
-        elif comp == "Daily":
-            return (1 + r / 365) ** (365 / periods_per_year) - 1
-        elif comp == "Semi-Annual (Canadian)":
-            return (1 + r / 2) ** (2 / periods_per_year) - 1
+        if comp == "Monthly": return r / 12 if periods_per_year == 12 else ((1 + r/12)**(12/26) - 1)
+        elif comp == "Daily": return (1 + r / 365) ** (365 / periods_per_year) - 1
+        elif comp == "Semi-Annual (Canadian)": return (1 + r / 2) ** (2 / periods_per_year) - 1
 
     def get_emi(princ, rate_per_period, periods_left):
         if rate_per_period <= 0: return princ / periods_left if periods_left > 0 else 0
@@ -172,20 +239,16 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
     neg_amortization_flag = False
     infinite_loan_flag = False
     applied_lump_indices = set()
-
     period_tax = annual_tax / periods_per_year
     period_ins = annual_ins / periods_per_year
     trend_period_interval = int(round(trnd_mo * (26/12))) if periods_per_year == 26 else int(trnd_mo)
 
     for period in range(1, failsafe_cap):
-        if freq == "Monthly":
-            current_date += pd.DateOffset(months=1)
-        else:
-            current_date += pd.Timedelta(days=14)
+        if freq == "Monthly": current_date += pd.DateOffset(months=1)
+        else: current_date += pd.Timedelta(days=14)
             
         rate_changed = False
         
-        # --- FLOATING RATE ENGINE ---
         if trnd_act:
             if rate_mode_sel == "Predictable Trend":
                 if period > 1 and (period - 1) % trend_period_interval == 0:
@@ -194,9 +257,7 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
             elif rate_mode_sel == "Custom Schedule (RBI Style)":
                 applicable_rate = current_rate
                 for r_dt, r_pct in custom_rates:
-                    if current_date >= r_dt:
-                        applicable_rate = r_pct
-                
+                    if current_date >= r_dt: applicable_rate = r_pct
                 if applicable_rate != current_rate:
                     current_rate = applicable_rate
                     rate_changed = True
@@ -209,7 +270,6 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
         
         period_r = get_period_rate(current_rate)
         interest = balance * period_r
-        
         principal_pay = base_payment - interest
         actual_principal = principal_pay + ext_pay
         
@@ -222,49 +282,38 @@ def run_amortization(p, r_annual, yrs, start_dt, freq, comp, ext_pay, rec_lump, 
                 actual_principal += l_amt
                 applied_lump_indices.add(i)
 
-        if actual_principal < 0:
-            neg_amortization_flag = True
-
+        if actual_principal < 0: neg_amortization_flag = True
         if actual_principal >= balance:
             actual_principal = balance
             balance = 0
-        else:
-            balance -= actual_principal
+        else: balance -= actual_principal
 
         data.append({
-            "Period": period,
-            "Date": current_date.date(),
-            "Rate (%)": round(current_rate, 3), 
+            "Period": period, "Date": current_date.date(), "Rate (%)": round(current_rate, 3), 
             "Payment Outflow": interest + actual_principal + period_tax + period_ins,
-            "Interest": interest,
-            "Principal": actual_principal,
-            "Taxes & Ins": period_tax + period_ins,
-            "Remaining Balance": balance
+            "Interest": interest, "Principal": actual_principal,
+            "Taxes & Ins": period_tax + period_ins, "Remaining Balance": balance
         })
 
-        if balance <= 0:
-            break
-            
-        if period == failsafe_cap - 1 and balance > 0:
-            infinite_loan_flag = True
+        if balance <= 0: break
+        if period == failsafe_cap - 1 and balance > 0: infinite_loan_flag = True
 
     return pd.DataFrame(data), neg_amortization_flag, infinite_loan_flag
 
-# --- EXECUTE ENGINE ---
 df_base, _, _ = run_amortization(principal, annual_rate, years, start_date, "Monthly", "Monthly", 0, 0, 1, (), False, "Predictable Trend", "Keep EMI Same (Adjust Tenure)", 0, 1, ())
 df_actual, has_neg_amortization, is_infinite = run_amortization(principal, annual_rate, years, start_date, payment_freq, compounding, extra_payment, recurring_lump, recurring_month, custom_lump_tuple, rate_trend_active, rate_mode, rate_action, trend_amount, trend_months, custom_rates_tuple)
 
-# UI UX UPGRADE: Micro-interaction toast
 st.toast("✅ Loan Engine Recalculated!")
 
-# --- UI DASHBOARD ---
+# --- MAIN UI DASHBOARD ---
 st.markdown('<h1 class="premium-header">🏦 Pro Loan Architect</h1>', unsafe_allow_html=True)
 st.caption("Advanced Real Estate Amortization & Cash Flow Engine")
 
+if app_mode == "Reverse Affordability":
+    st.success(f"🏠 **Max Affordability:** Based on an EMI of {format_num(target_emi, fmt_system)} and a downpayment of {format_num(down_payment, fmt_system)}, the maximum Home Price you can afford is **{format_num(principal + down_payment, fmt_system)}** (Loan Amount: {format_num(principal, fmt_system)}).")
+
 if has_neg_amortization:
     st.error("⚠️ **CRITICAL WARNING: Negative Amortization Detected!** Your interest rate has climbed so high that your payments no longer cover the monthly interest. Your loan balance is actually *growing*.")
-if is_infinite:
-    st.error("🚨 **INFINITE LOAN DETECTED:** Your current parameters will never pay off the loan. The calculation was capped to prevent a server crash.")
 
 base_interest = df_base["Interest"].sum()
 actual_interest = df_actual["Interest"].sum()
@@ -277,11 +326,12 @@ month_diff = (payoff_date_base.year - payoff_date_actual.year) * 12 + (payoff_da
 cross_over_df = df_actual[df_actual["Principal"] > df_actual["Interest"]]
 cross_over_date = cross_over_df.iloc[0]["Date"].strftime('%B %Y') if not cross_over_df.empty else None
 
-# UI UX UPGRADE: Elevated Container for Metrics
-with st.container(border=True):
+with st.container():
     st.markdown("### 🎯 Scenario Summary")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Original Total Interest", format_num(base_interest, fmt_system))
+    
+    principal_label = "Calculated Loan Amount" if app_mode == "Reverse Affordability" else "Original Loan Amount"
+    c1.metric(principal_label, format_num(principal, fmt_system))
 
     if is_infinite:
         c2.metric("Actual Total Interest", "Infinite 🚨")
@@ -289,19 +339,15 @@ with st.container(border=True):
         c4.metric("Actual Payoff Date", "NEVER")
     else:
         c2.metric("Actual Total Interest", format_num(actual_interest, fmt_system))
-        if interest_saved >= 0:
+        if interest_saved > 0:
             c3.metric("Interest Saved 🎉", format_num(interest_saved, fmt_system), f"+{format_num(interest_saved, fmt_system)}")
             c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Saved {month_diff} mos")
         else:
-            c3.metric("Extra Interest Paid 📉", format_num(abs(interest_saved), fmt_system), f"-{format_num(abs(interest_saved), fmt_system)}")
-            c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"Extended by {abs(month_diff)} mos")
-
-if cross_over_date and not has_neg_amortization and not is_infinite:
-    st.success(f"🔥 **Cross-Over Milestone:** In **{cross_over_date}**, you will officially start paying more toward your Home's Principal than to the Bank's Interest!")
+            c3.metric("Standard Payoff Date", payoff_date_base.strftime('%b %Y'))
+            c4.metric("Actual Payoff Date", payoff_date_actual.strftime('%b %Y'), f"{abs(month_diff)} mos diff")
 
 st.divider()
 
-# --- UI CHARTS ---
 tab1, tab2 = st.tabs(["📈 Visual Analytics", "📑 Detailed Ledger"])
 
 with tab1:
@@ -318,7 +364,6 @@ with tab1:
         fig_comp.add_trace(go.Scatter(x=df_actual["Date"], y=df_actual["Principal"], name="Principal Paid", line=dict(color='mediumseagreen')))
         fig_comp.update_layout(title="Principal vs Interest Intersection", xaxis_title="Timeline", yaxis_title="Amount per Period", hovermode="x unified", height=400)
         st.plotly_chart(fig_comp, use_container_width=True)
-
     with col_r:
         df_actual["Cum_Outflow"] = df_actual["Payment Outflow"].cumsum()
         fig_cash = go.Figure()
@@ -329,9 +374,14 @@ with tab1:
 with tab2:
     st.subheader("Interactive Amortization Ledger")
     display_df = df_actual.copy()
-    display_cols =["Payment Outflow", "Interest", "Principal", "Taxes & Ins", "Remaining Balance"]
-    for col in display_cols:
+    for col in ["Payment Outflow", "Interest", "Principal", "Taxes & Ins", "Remaining Balance"]:
         display_df[col] = display_df[col].apply(lambda x: format_num(x, fmt_system))
+    st.dataframe(display_df, use_container_width=True, height=450)
     
-    st.dataframe(display_df, use_container_width=True, height=500)
-    st.download_button("📥 Download Ledger (CSV)", data=df_actual.to_csv(index=False).encode('utf-8'), file_name="pro_amortization.csv", mime="text/csv")
+    dl_col1, dl_col2, _ = st.columns([1, 1, 3])
+    with dl_col1:
+        st.download_button("📥 Download CSV", data=df_actual.to_csv(index=False).encode('utf-8'), file_name="amortization.csv", mime="text/csv", use_container_width=True)
+    with dl_col2:
+        if not is_infinite:
+            pdf_bytes = generate_pdf_report(df_actual.copy(), principal, actual_interest, interest_saved, payoff_date_actual.strftime('%B %Y'), fmt_system)
+            st.download_button("📄 Download PDF Report", data=pdf_bytes, file_name="Loan_Report.pdf", mime="application/pdf", use_container_width=True)

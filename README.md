@@ -6,7 +6,7 @@
 ![Plotly](https://img.shields.io/badge/Plotly-Interactive%20Charts-3F4F75?logo=plotly&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-**Live Application:** [Launch Pro Loan Architect Here](https://home-loan-calculator-vfggbjajyxlsyrsypjjjbx.streamlit.app) *(Replace with your actual URL)*
+**Live Application:** [Launch Pro Loan Architect Here](https://home-loan-calculator-vfggbjajyxlsyrsypjjjbx.streamlit.app) 
 
 ---
 
